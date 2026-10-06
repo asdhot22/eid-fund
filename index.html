@@ -33,6 +33,7 @@ input,select{width:100%;padding:11px;border:1px solid #ccc;border-radius:9px;fon
 <div class="wrap">
 <h1>صندوق الاجتماع السنوي</h1>
 <div class="sub">1448هـ • 9 أشهر × 50 ريال = 450 ريال • من 27 محرم إلى 27 رمضان • عدد المشتركين مفتوح</div>
+<div id="cloudStatus" class="small" style="margin-bottom:12px;color:#6b7280">جاري الاتصال بقاعدة البيانات...</div>
 
 <div class="stats">
 <div class="card stat"><span>المشتركين</span><b id="stMembers">0</b></div>
@@ -91,13 +92,28 @@ input,select{width:100%;padding:11px;border:1px solid #ccc;border-radius:9px;fon
 </div>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script>
+var firebaseConfig={
+  apiKey:"AIzaSyDLwfT8K3Pfv90CNhCrZ_NzSwSYXj2gB6g",
+  authDomain:"eid-fund-a01ad.firebaseapp.com",
+  projectId:"eid-fund-a01ad",
+  storageBucket:"eid-fund-a01ad.firebasestorage.app",
+  messagingSenderId:"246702939725",
+  appId:"1:246702939725:web:f5e371cb96a94fb0e2c604"
+};
+firebase.initializeApp(firebaseConfig);
+var firestore=firebase.firestore();
+var stateDoc=firestore.collection("app").doc("state");
+var cloudReady=false;
+var applyingCloud=false;
+
 var MONTHLY=50;
 var TOTAL_MONTHS=9;
 var TOTAL_YEAR=450;
 var now=new Date();
 
-/* مواعيد الاستحقاق حسب تقويم أم القرى - 27 من كل شهر هجري */
 var hijriSchedule=[
   {name:'محرم', hijri:'27 محرم 1448', greg:'12/07/2026', due:'2026-07-12'},
   {name:'صفر', hijri:'27 صفر 1448', greg:'10/08/2026', due:'2026-08-10'},
@@ -125,27 +141,93 @@ var currentDueCount=dueInstallmentsNow();
 var db={members:[],payments:[]};
 var editId=null;
 
-function loadDB(){
-  try{
-    var saved=localStorage.getItem('eidFundSimple');
-    if(saved){ db=JSON.parse(saved); }
-  }catch(e){ db={members:[],payments:[]}; }
-  if(!db.members) db.members=[];
-  if(!db.payments) db.payments=[];
+function normalizeDB(){
+  if(!db || typeof db!=='object') db={members:[],payments:[]};
+  if(!Array.isArray(db.members)) db.members=[];
+  if(!Array.isArray(db.payments)) db.payments=[];
   for(var i=0;i<db.members.length;i++){
     if(typeof db.members[i].active==='undefined') db.members[i].active=true;
   }
 }
+
+function loadLocalDB(){
+  try{
+    var saved=localStorage.getItem('eidFundSimple');
+    if(saved){ db=JSON.parse(saved); }
+  }catch(e){ db={members:[],payments:[]}; }
+  normalizeDB();
+}
+
+function setCloudStatus(text,color){
+  var el=document.getElementById('cloudStatus');
+  if(!el) return;
+  el.innerHTML=text;
+  if(color) el.style.color=color;
+}
+
+function connectCloud(){
+  stateDoc.onSnapshot(function(doc){
+    if(doc.exists){
+      applyingCloud=true;
+      var data=doc.data()||{};
+      db={
+        members:Array.isArray(data.members)?data.members:[],
+        payments:Array.isArray(data.payments)?data.payments:[]
+      };
+      normalizeDB();
+      localStorage.setItem('eidFundSimple',JSON.stringify(db));
+      cloudReady=true;
+      setCloudStatus('☁️ البيانات متصلة ومحفوظة على Firebase','#15803d');
+      renderAll();
+      applyingCloud=false;
+    }else{
+      cloudReady=true;
+      normalizeDB();
+      stateDoc.set({
+        members:db.members,
+        payments:db.payments,
+        updatedAt:firebase.firestore.FieldValue.serverTimestamp()
+      }).then(function(){
+        setCloudStatus('☁️ تم نقل البيانات الحالية إلى Firebase','#15803d');
+      }).catch(function(err){
+        console.error(err);
+        setCloudStatus('تعذر رفع البيانات إلى Firebase - العمل محليًا فقط','#b91c1c');
+      });
+    }
+  },function(err){
+    console.error(err);
+    cloudReady=false;
+    setCloudStatus('تعذر الاتصال بـ Firebase - العمل محليًا مؤقتًا','#b91c1c');
+    renderAll();
+  });
+}
+
 function saveDB(){
+  normalizeDB();
   localStorage.setItem('eidFundSimple',JSON.stringify(db));
   renderAll();
+
+  if(cloudReady && !applyingCloud){
+    stateDoc.set({
+      members:db.members,
+      payments:db.payments,
+      updatedAt:firebase.firestore.FieldValue.serverTimestamp()
+    }).then(function(){
+      setCloudStatus('☁️ تم الحفظ والمزامنة','#15803d');
+    }).catch(function(err){
+      console.error(err);
+      setCloudStatus('تم الحفظ محليًا، لكن فشلت المزامنة','#b91c1c');
+    });
+  }
 }
+
 function hideSections(){
   document.getElementById('addSection').className='card form';
   document.getElementById('paymentSection').className='card form';
   document.getElementById('reportSection').className='card form';
   document.getElementById('membersSection').style.display='none';
 }
+
 function showAdd(){
   hideSections();
   editId=null;
@@ -154,6 +236,7 @@ function showAdd(){
   document.getElementById('memberPhone').value='';
   document.getElementById('addSection').className='card form show';
 }
+
 function showEdit(id){
   hideSections();
   var m=findMember(id);
@@ -164,73 +247,100 @@ function showEdit(id){
   document.getElementById('memberPhone').value=m.phone||'';
   document.getElementById('addSection').className='card form show';
 }
+
 function showPayment(){
   hideSections();
   fillMemberSelect();
   updateAmount();
   document.getElementById('paymentSection').className='card form show';
 }
+
 function showReport(){
   hideSections();
   renderReport();
   document.getElementById('reportSection').className='card form show';
 }
+
 function showMembers(){
   hideSections();
   document.getElementById('membersSection').style.display='block';
 }
+
 function saveMember(){
   var name=document.getElementById('memberName').value.trim();
   var phone=document.getElementById('memberPhone').value.trim();
   if(!name){ alert('اكتب اسم المشترك'); return; }
+
   if(editId){
     var m=findMember(editId);
-    if(m){ m.name=name; m.phone=phone; }
+    if(m){
+      m.name=name;
+      m.phone=phone;
+    }
   }else{
-    db.members.push({id:(new Date()).getTime(),name:name,phone:phone,active:true});
+    db.members.push({
+      id:(new Date()).getTime(),
+      name:name,
+      phone:phone,
+      active:true
+    });
   }
+
   editId=null;
   saveDB();
   showMembers();
 }
+
 function stopMember(id){
   var m=findMember(id);
   if(!m) return;
+
   if(confirm('إيقاف المشترك؟ ستبقى دفعاته محفوظة.')){
     m.active=false;
     saveDB();
   }
 }
+
 function findMember(id){
   for(var i=0;i<db.members.length;i++){
     if(db.members[i].id==id) return db.members[i];
   }
   return null;
 }
+
 function paidTotal(id){
   var t=0;
   for(var i=0;i<db.payments.length;i++){
-    if(db.payments[i].memberId==id) t+=Number(db.payments[i].amount||0);
+    if(db.payments[i].memberId==id){
+      t+=Number(db.payments[i].amount||0);
+    }
   }
   return t;
 }
+
 function paidMonths(id){
   return Math.floor(paidTotal(id)/MONTHLY);
 }
+
 function overdueMonths(id){
   var p=paidMonths(id);
   if(p>TOTAL_MONTHS) p=TOTAL_MONTHS;
+
   var late=currentDueCount-p;
   if(late<0) late=0;
+
   return late;
 }
+
 function remainingYear(id){
   var r=TOTAL_YEAR-paidTotal(id);
   return r<0?0:r;
 }
+
 function fillMemberSelect(){
   var s=document.getElementById('paymentMember');
   s.innerHTML='';
+
   for(var i=0;i<db.members.length;i++){
     if(db.members[i].active!==false){
       var o=document.createElement('option');
@@ -240,14 +350,22 @@ function fillMemberSelect(){
     }
   }
 }
+
 function updateAmount(){
   var count=Number(document.getElementById('paymentMonths').value||1);
   document.getElementById('paymentAmount').value=(count*MONTHLY)+' ريال';
 }
+
 function savePayment(){
   var sid=document.getElementById('paymentMember').value;
-  if(!sid){ alert('أضف مشترك أولاً'); return; }
+
+  if(!sid){
+    alert('أضف مشترك أولاً');
+    return;
+  }
+
   var count=Number(document.getElementById('paymentMonths').value||1);
+
   db.payments.push({
     id:(new Date()).getTime(),
     memberId:Number(sid),
@@ -256,22 +374,31 @@ function savePayment(){
     note:document.getElementById('paymentNote').value||'',
     date:new Date().toISOString()
   });
+
   document.getElementById('paymentMonths').value='1';
   document.getElementById('paymentNote').value='';
+
   saveDB();
   showMembers();
 }
+
 function renderMembers(){
   var box=document.getElementById('membersList');
   box.innerHTML='';
+
   var count=0;
+
   for(var i=0;i<db.members.length;i++){
     var m=db.members[i];
+
     if(m.active===false) continue;
+
     count++;
     var late=overdueMonths(m.id);
+
     var d=document.createElement('div');
     d.className='member';
+
     d.innerHTML=
       '<div><div class="name">'+safe(m.name)+'</div><div class="small">'+safe(m.phone||'')+'</div></div>'+
       '<div class="'+(late?'bad':'ok')+'">'+(late?('متأخر '+late+' شهر'):'منتظم')+'</div>'+
@@ -283,21 +410,27 @@ function renderMembers(){
       '<button class="blue" onclick="sendSMS('+m.id+')">SMS</button> '+
       '<button class="red" onclick="stopMember('+m.id+')">إيقاف</button>'+
       '</div>';
+
     box.appendChild(d);
   }
+
   document.getElementById('emptyText').style.display=count?'none':'block';
 }
+
 function quickPay(id){
   showPayment();
   document.getElementById('paymentMember').value=String(id);
 }
+
 function buildMessage(id){
   var m=findMember(id);
   if(!m) return '';
+
   var paid=paidTotal(id);
   var months=paidMonths(id);
   var late=overdueMonths(id);
   var remaining=remainingYear(id);
+
   return 'السلام عليكم '+m.name+'\n'+
          'صندوق الاجتماع السنوي\n'+
          'إجمالي المسدد: '+paid+' ريال ('+Math.min(months,9)+' من 9 أشهر)\n'+
@@ -305,33 +438,56 @@ function buildMessage(id){
          'المتبقي لإكمال دورة الاشتراك: '+remaining+' ريال\n'+
          'وشكرًا لك';
 }
+
 function normalizePhone(p){
   var x=String(p||'').replace(/\D/g,'');
-  if(x.indexOf('05')===0) x='966'+x.substring(1);
-  else if(x.indexOf('5')===0) x='966'+x;
+
+  if(x.indexOf('05')===0){
+    x='966'+x.substring(1);
+  }else if(x.indexOf('5')===0){
+    x='966'+x;
+  }
+
   return x;
 }
+
 function sendWhatsApp(id){
   var m=findMember(id);
-  if(!m || !m.phone){ alert('لا يوجد رقم جوال لهذا المشترك'); return; }
+
+  if(!m || !m.phone){
+    alert('لا يوجد رقم جوال لهذا المشترك');
+    return;
+  }
+
   var phone=normalizePhone(m.phone);
   var url='https://wa.me/'+phone+'?text='+encodeURIComponent(buildMessage(id));
+
   window.open(url,'_blank');
 }
+
 function sendSMS(id){
   var m=findMember(id);
-  if(!m || !m.phone){ alert('لا يوجد رقم جوال لهذا المشترك'); return; }
+
+  if(!m || !m.phone){
+    alert('لا يوجد رقم جوال لهذا المشترك');
+    return;
+  }
+
   var body=encodeURIComponent(buildMessage(id));
   window.location.href='sms:'+m.phone+'?&body='+body;
 }
+
 function renderReport(){
   var box=document.getElementById('reportList');
   box.innerHTML='';
+
   for(var i=0;i<db.members.length;i++){
     var m=db.members[i];
     var late=overdueMonths(m.id);
+
     var d=document.createElement('div');
     d.className='reportrow';
+
     d.innerHTML=
       '<div><b>'+safe(m.name)+'</b>'+(m.active===false?'<div class="small">مشترك سابق</div>':'')+'</div>'+
       '<div style="text-align:left">'+
@@ -339,23 +495,33 @@ function renderReport(){
       '<div class="'+(late?'bad':'ok')+'">'+(late?('متأخر '+late+' شهر = '+(late*50)+' ر.س'):'لا توجد متأخرات')+'</div>'+
       '<div class="small">المتبقي من 9 أشهر: '+remainingYear(m.id)+' ر.س</div>'+
       '</div>';
+
     box.appendChild(d);
   }
 }
+
 function renderStats(){
-  var active=0,total=0,late=0;
+  var active=0;
+  var total=0;
+  var late=0;
+
   for(var i=0;i<db.members.length;i++){
     if(db.members[i].active!==false){
       active++;
       late+=overdueMonths(db.members[i].id)*MONTHLY;
     }
   }
-  for(var j=0;j<db.payments.length;j++) total+=Number(db.payments[j].amount||0);
+
+  for(var j=0;j<db.payments.length;j++){
+    total+=Number(db.payments[j].amount||0);
+  }
+
   document.getElementById('stMembers').innerHTML=active;
   document.getElementById('stTotal').innerHTML=total+' ر.س';
   document.getElementById('stDue').innerHTML=(active*currentDueCount*MONTHLY)+' ر.س';
   document.getElementById('stLate').innerHTML=late+' ر.س';
 }
+
 function renderAll(){
   renderStats();
   renderMembers();
@@ -363,14 +529,22 @@ function renderAll(){
   updateAmount();
   renderReport();
 }
+
 function safe(s){
   s=String(s||'');
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  return s
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
 }
 
-loadDB();
+loadLocalDB();
 renderAll();
 showMembers();
+connectCloud();
 </script>
 </body>
 </html>
+
